@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Aquarium Standalone Optimized</title>
+  <style>
+    html,body{margin:0;height:100%;overflow:hidden;background:#021225}
+    canvas{display:block;width:100vw;height:100vh}
+    .hud{position:fixed;left:12px;top:12px;color:#d6f7ff;font:12px/1.35 system-ui,sans-serif;background:rgba(4,22,35,.45);border:1px solid rgba(170,233,255,.2);border-radius:10px;padding:8px 10px;pointer-events:none;user-select:none}
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="hud">Optimized: drag orbit • wheel zoom</div>
+<script>
+/*
+  ====================================================================================================
+  Standalone 3D Aquarium (Optimized, No External Dependencies)
+  Автономный 3D-аквариум (оптимизированный, без внешних зависимостей)
+  ====================================================================================================
+
+  [RU] Как правильно разместить этот файл на веб-сервере:
+  1) Положите файл на сервер как обычную статическую страницу, например:
+     /var/www/html/interactive-3d-aquarium-standalone-optimized.html
+  2) Для локальной проверки используйте любой статический сервер (рекомендуется):
+     - Python:  python -m http.server 8080
+     - Node:    npx serve .
+     Затем откройте: http://localhost:8080/interactive-3d-aquarium-standalone-optimized.html
+  3) HTTPS желателен в production (стандартная практика безопасности браузера).
+  4) Этот файл не требует backend, cookie, localStorage и внешних CDN.
+
+  [EN] How to deploy this file on a web server:
+  1) Put this file on your static host, for example:
+     /var/www/html/interactive-3d-aquarium-standalone-optimized.html
+  2) For local testing, run any static server (recommended):
+     - Python:  python -m http.server 8080
+     - Node:    npx serve .
+     Then open: http://localhost:8080/interactive-3d-aquarium-standalone-optimized.html
+  3) Use HTTPS in production (browser security best practice).
+  4) No backend, cookies, localStorage, or external CDN are required.
+
+  [RU/EN] Security notes:
+  - No eval / Function constructor / dynamic script injection.
+  - No untrusted user input is parsed/executed.
+  - No network requests are performed.
+  - No DOM innerHTML writes with user data.
+  - Runtime is deterministic enough and bounded (fixed fish/particle counts), reducing DoS risk.
+*/
+"use strict";
+// [RU] Базовые ссылки на canvas и 2D-контекст рендера.
+// [EN] Core references to canvas and 2D rendering context.
+const c=document.getElementById("c"),x=c.getContext("2d",{alpha:false}),PI=Math.PI,T=PI*2;
+// [RU] Часто используемые утилиты: random, clamp, linear interpolation.
+// [EN] Common math helpers: random, clamp, linear interpolation.
+const R=(a,b)=>a+Math.random()*(b-a),C=(v,a,b)=>v<a?a:v>b?b:v,L=(a,b,t)=>a+(b-a)*t;
+// [RU] Текущие размеры viewport и device pixel ratio.
+// [EN] Current viewport dimensions and device pixel ratio.
+let W=1,H=1,D=1;
+// [RU] Параметры аквариума и внутренние полуграницы движения.
+// [EN] Aquarium dimensions and internal half-bounds for movement.
+const tank={w:7.2,h:4.2,d:3.8},half={x:tank.w*.5-.2,y:tank.h-.2,z:tank.d*.5-.2};
+// [RU] Параметры камеры орбиты (target, yaw/pitch, distance, FOV).
+// [EN] Orbit camera parameters (target, yaw/pitch, distance, FOV).
+const cam={tx:0,ty:1.8,tz:0,yaw:.45,pitch:.22,dist:12,fov:60*PI/180};
+// [RU] Базис камеры (eye/forward/right/up) пересчитывается каждый кадр.
+// [EN] Camera basis (eye/forward/right/up) is recomputed each frame.
+const cb={ex:0,ey:0,ez:0,fx:0,fy:0,fz:1,rx:1,ry:0,rz:0,ux:0,uy:1,uz:0};
+// [RU] Цветовые палитры для визуальных вариаций рыб.
+// [EN] Fish color palettes for visual variation.
+const pal=[["#ff8a5b","#ffd56d"],["#63c9ff","#a6ffe2"],["#ff76bb","#ffd48f"],["#8f8aff","#73ebff"],["#75e38e","#ddff8a"],["#ffd06d","#ff8f6e"]];
+// [RU] Основные коллекции сцены:
+//      fishes  - состояние каждой рыбы (позиция, скорость, ритмы, габариты)
+//      plants  - водоросли
+//      bubbles - пузырьки
+//      rings   - буфер сегментов тела рыбы (используется повторно для производительности)
+// [EN] Main scene collections:
+//      fishes  - per-fish state (position, velocity, rhythms, bounds)
+//      plants  - seaweed
+//      bubbles - bubbles
+//      rings   - reusable fish body segment buffer (performance optimization)
+const fishes=[],plants=[],bubbles=[],rings=Array.from({length:18},()=>({lx:0,ly:0,lz:0,rx:0,ry:0,rz:0,tx:0,ty:0,tz:0,bx:0,by:0,bz:0,cx:0,cy:0,cz:0,u:0}));
+// [RU] Временный ортонормированный базис рыбы (направление/право/верх).
+// [EN] Temporary fish local basis (forward/right/up).
+const tmp={fx:0,fy:0,fz:0,rx:0,ry:0,rz:0,ux:0,uy:0,uz:0};
+// [RU] Очередь задач отрисовки с depth-сортировкой + временные точки проекции.
+// [EN] Deferred draw job queue with depth sorting + temporary projection points.
+const jobs=[],pts=[];
+// [RU] Обновление размеров canvas под окно и DPR.
+// [EN] Resize canvas according to viewport and DPR.
+function resize(){D=Math.min(devicePixelRatio||1,2);W=innerWidth|0;H=innerHeight|0;c.width=W*D;c.height=H*D;x.setTransform(D,0,0,D,0,0)}
+addEventListener("resize",resize);resize();
+// [RU] Мышиный ввод: drag для орбиты, wheel для zoom.
+// [EN] Mouse input: drag to orbit, wheel to zoom.
+let drag=0,mx=0,my=0;
+c.onmousedown=e=>{drag=1;mx=e.clientX;my=e.clientY};
+addEventListener("mouseup",()=>drag=0);
+addEventListener("mousemove",e=>{if(!drag)return;const dx=(e.clientX-mx)*.005,dy=(e.clientY-my)*.005;mx=e.clientX;my=e.clientY;cam.yaw-=dx;cam.pitch=C(cam.pitch-dy,-1.25,1.25)});
+addEventListener("wheel",e=>{cam.dist=C(cam.dist*(1+Math.sign(e.deltaY)*.08),6,22);e.preventDefault()},{passive:false});
+
+// [RU] Инициализация растений.
+// [EN] Plant initialization.
+for(let i=0;i<20;i++)plants.push({x:R(-tank.w*.46,tank.w*.46),z:R(-tank.d*.46,tank.d*.46),h:R(.6,1.8),p:R(0,T)});
+// [RU] Инициализация пузырьков.
+// [EN] Bubble initialization.
+for(let i=0;i<120;i++)bubbles.push({x:R(-half.x,half.x),y:R(.15,half.y),z:R(-half.z,half.z),s:R(.2,.5),w:R(.1,.35),p:R(0,T)});
+// [RU] Инициализация рыб:
+//      len/h/wd  - геометрия корпуса
+//      bs/ms     - базовая/макс скорость
+//      rad       - защитный радиус (границы + анти-overlap)
+//      tc/fc     - частоты хвоста/плавников (зависят от размера)
+//      p/pp/dp   - фазовые сдвиги для рассинхронизации
+// [EN] Fish initialization:
+//      len/h/wd  - body geometry
+//      bs/ms     - base/max speed
+//      rad       - safety radius (bounds + anti-overlap)
+//      tc/fc     - tail/fin cadence multipliers (size-dependent)
+//      p/pp/dp   - phase offsets for desynchronization
+for(let i=0;i<9;i++){
+  const q=pal[i%pal.length],sz=R(.78,1.25),vx=R(-1,1),vy=R(-.25,.25),vz=R(-1,1),vl=Math.hypot(vx,vy,vz)||1;
+  fishes.push({
+    x:R(-half.x*.8,half.x*.8),y:R(.7,half.y-.3),z:R(-half.z*.8,half.z*.8),
+    vx:vx/vl*R(.5,1),vy:vy/vl*R(.5,1),vz:vz/vl*R(.5,1),
+    dx:0,dy:0,dz:0,b:1,bt:R(.5,5),w:R(0,T),bank:0,p:R(0,T),
+    len:sz*R(.95,1.2),h:sz*R(.32,.42),wd:sz*R(.2,.3),bs:R(.35,.6),ms:R(1.1,1.8),c1:q[0],c2:q[1],rad:0,tc:1,fc:1,pp:R(0,T),dp:R(0,T)
+  });
+  const f=fishes[fishes.length-1];
+  // Conservative bounding sphere for body + fins + tail swing.
+  f.rad=Math.max(f.len*.55,f.wd*1.35,f.h*1.25)+0.03;
+  // Bigger fish move fins/tail slower; each fish keeps its own rhythm multipliers.
+  f.tc=C((1.08/f.len)*R(.9,1.15),.62,1.45);
+  f.fc=C(f.tc*R(.85,1.2),.55,1.7);
+}
+
+// [RU] Пересчет матрицы-вида (камерного базиса).
+// [EN] Recompute view basis for camera.
+function basis(){
+  const cp=Math.cos(cam.pitch),sp=Math.sin(cam.pitch),cy=Math.cos(cam.yaw),sy=Math.sin(cam.yaw);
+  cb.ex=cam.tx+cam.dist*cp*sy;cb.ey=cam.ty+cam.dist*sp;cb.ez=cam.tz+cam.dist*cp*cy;
+  let fx=cam.tx-cb.ex,fy=cam.ty-cb.ey,fz=cam.tz-cb.ez,fl=Math.hypot(fx,fy,fz)||1;fx/=fl;fy/=fl;fz/=fl;
+  let rx=fy*0-fz*1,ry=fz*0-fx*0,rz=fx*1-fy*0,rl=Math.hypot(rx,ry,rz)||1;rx/=rl;ry/=rl;rz/=rl;
+  let ux=ry*fz-rz*fy,uy=rz*fx-rx*fz,uz=rx*fy-ry*fx;
+  cb.fx=fx;cb.fy=fy;cb.fz=fz;cb.rx=rx;cb.ry=ry;cb.rz=rz;cb.ux=ux;cb.uy=uy;cb.uz=uz;
+}
+// [RU] Проекция world->screen; возвращает 0, если точка за камерой/слишком близко.
+// [EN] World->screen projection; returns 0 when point is behind camera/too close.
+function P(px,py,pz,out){
+  const ax=px-cb.ex,ay=py-cb.ey,az=pz-cb.ez,z=ax*cb.fx+ay*cb.fy+az*cb.fz;if(z<=.05)return 0;
+  const f=(H*.5)/Math.tan(cam.fov*.5),sx=W*.5+(ax*cb.rx+ay*cb.ry+az*cb.rz)*f/z,sy=H*.5-(ax*cb.ux+ay*cb.uy+az*cb.uz)*f/z;
+  out.x=sx;out.y=sy;out.z=z;return 1;
+}
+// [RU] Универсальная отрисовка полигона.
+// [EN] Generic polygon draw helper.
+function poly(a,fill,stroke,w=1){
+  if(a.length<2)return;x.beginPath();x.moveTo(a[0].x,a[0].y);for(let i=1;i<a.length;i++)x.lineTo(a[i].x,a[i].y);x.closePath();
+  if(fill){x.fillStyle=fill;x.fill()}if(stroke){x.strokeStyle=stroke;x.lineWidth=w;x.stroke()}
+}
+// [RU] HEX -> RGBA.
+// [EN] HEX -> RGBA.
+function rgb(hex,a){const n=parseInt(hex.slice(1),16);return`rgba(${n>>16&255},${n>>8&255},${n&255},${a})`}
+// [RU] Добавляет задачу отрисовки в очередь с глубиной.
+// [EN] Push deferred draw job with depth.
+function job(fn,z){jobs.push({fn,z})}
+
+// [RU] Обновление динамики рыбы:
+//      - wander + center pull
+//      - избегание стен
+//      - separation/alignment/cohesion
+//      - ограничение скорости
+//      - кламп по границам с учетом радиуса
+// [EN] Fish motion update:
+//      - wander + center pull
+//      - boundary avoidance
+//      - separation/alignment/cohesion
+//      - speed limiting
+//      - bounds clamp with safety radius
+function updFish(f,dt,t){
+  f.w+=dt*(.7+f.bs);f.bt-=dt;if(f.bt<=0){f.bt=R(2.2,6.6);f.b=R(1.1,1.8)}else f.b=L(f.b,1,dt*.8);
+  const m=.45+f.rad,minX=-half.x+f.rad,maxX=half.x-f.rad,minY=.02+f.rad,maxY=half.y-f.rad,minZ=-half.z+f.rad,maxZ=half.z-f.rad;
+  let bx=0,by=0,bz=0;
+  if(f.x>maxX-m)bx-=((f.x-(maxX-m))/m)*2.4; if(f.x<minX+m)bx+=(((minX+m)-f.x)/m)*2.4;
+  if(f.y>maxY-m)by-=((f.y-(maxY-m))/m)*2.2; if(f.y<minY+m)by+=(((minY+m)-f.y)/m)*2.1;
+  if(f.z>maxZ-m)bz-=((f.z-(maxZ-m))/m)*2.4; if(f.z<minZ+m)bz+=(((minZ+m)-f.z)/m)*2.4;
+  const wx=Math.cos(f.w)*.42,wy=Math.sin(t*.9+f.p)*.12,wz=Math.sin(f.w*.78)*.35,cx=-f.x*.08,cy=(tank.h*.53-f.y)*.06,cz=-f.z*.08;
+  let sx=0,sy=0,sz=0,ax=0,ay=0,az=0,hx=0,hy=0,hz=0,n=0;
+  for(let i=0;i<fishes.length;i++){const o=fishes[i];if(o===f)continue;const dx=f.x-o.x,dy=f.y-o.y,dz=f.z-o.z,d=Math.hypot(dx,dy,dz);
+    const sepDist=f.rad+o.rad+.18;
+    if(d<sepDist&&d>.001){const k=(sepDist-d)*1.1/d;sx+=dx*k;sy+=dy*k;sz+=dz*k}
+    if(d<2.4){ax+=o.vx;ay+=o.vy;az+=o.vz;hx+=o.x;hy+=o.y;hz+=o.z;n++}
+  }
+  if(n){const al=Math.hypot(ax,ay,az)||1;ax=ax/al*.2;ay=ay/al*.2;az=az/al*.2;hx=(hx/n-f.x)*.06;hy=(hy/n-f.y)*.06;hz=(hz/n-f.z)*.06}
+  f.dx=cx+wx+bx+sx*.45+ax+hx;f.dy=cy+wy+by+sy*.45+ay+hy;f.dz=cz+wz+bz+sz*.45+az+hz;
+  f.vx+=f.dx*dt*.95;f.vy+=f.dy*dt*.95;f.vz+=f.dz*dt*.95;
+  const ds=f.bs*f.b+Math.hypot(f.dx,f.dy,f.dz)*.2,sp=C(Math.hypot(f.vx,f.vy,f.vz),.2,f.ms),ns=L(sp,ds,dt*1.8),il=1/(Math.hypot(f.vx,f.vy,f.vz)||1);
+  f.vx*=il*ns;f.vy*=il*ns;f.vz*=il*ns;
+  f.x=C(f.x+f.vx*dt,minX,maxX);f.y=C(f.y+f.vy*dt,minY,maxY);f.z=C(f.z+f.vz*dt,minZ,maxZ);
+  f.bank=L(f.bank,C(f.dx*.35+f.dz*.2,-.8,.8),dt*1.9);
+}
+// [RU] Локальный базис рыбы по вектору скорости + banking.
+// [EN] Fish local frame from velocity + banking.
+function fishFrame(f){
+  let fx=f.vx,fy=f.vy,fz=f.vz,fl=Math.hypot(fx,fy,fz)||1;fx/=fl;fy/=fl;fz/=fl;
+  let rx=fy*0-fz*1,ry=fz*0-fx*0,rz=fx*1-fy*0,rl=Math.hypot(rx,ry,rz)||1;rx/=rl;ry/=rl;rz/=rl;
+  let ux=ry*fz-rz*fy,uy=rz*fx-rx*fz,uz=rx*fy-ry*fx,s=Math.sin(f.bank*.65),q=Math.cos(f.bank*.65);
+  tmp.fx=fx;tmp.fy=fy;tmp.fz=fz;tmp.rx=rx*q+ux*s;tmp.ry=ry*q+uy*s;tmp.rz=rz*q+uz*s;tmp.ux=ux*q-rx*s;tmp.uy=uy*q-ry*s;tmp.uz=uz*q-rz*s;
+}
+// [RU] Рендер одной рыбы:
+//      - процедурный объемный корпус из сегментов
+//      - верхний/грудные/хвостовой плавники
+//      - глаза
+//      - частоты движения привязаны к размеру и индивидуальным фазам
+// [EN] Render a single fish:
+//      - procedural volumetric segmented body
+//      - dorsal/pectoral/tail fins
+//      - eyes
+//      - motion frequencies are size-based and phase-desynced per fish
+function renderFish(f,t){
+  fishFrame(f);const speed=Math.hypot(f.vx,f.vy,f.vz),amp=.08+speed*.08,seg=16,bx=f.x-tmp.fx*f.len*.5,by=f.y-tmp.fy*f.len*.5,bz=f.z-tmp.fz*f.len*.5;
+  const bodyHz=(2.8+speed*4.2)*f.tc,finHz=(4.2+speed*2.5)*f.fc,pecHz=(5.8+speed*2.8)*f.fc;
+  for(let i=0;i<=seg;i++){
+    const u=i/seg,xf=(u-.5)*f.len,body=Math.sin(PI*Math.pow(u,.8)),mask=Math.max(0,(u-.35)/.65);
+    const w=Math.sin(t*bodyHz-u*9.2+f.p)*amp*mask,yw=Math.cos(t*(bodyHz*.62)-u*6.4+f.p)*amp*.15*mask;
+    const cx=bx+tmp.fx*(xf+f.len*.5)+tmp.rx*w,cy=by+tmp.fy*(xf+f.len*.5)+tmp.uy*yw,cz=bz+tmp.fz*(xf+f.len*.5)+tmp.rz*w;
+    const hw=f.wd*body*(1-Math.pow(Math.max(0,(u-.7)/.3),1.3)),hh=f.h*body*(1-Math.pow(Math.max(0,(u-.72)/.28),1.2));
+    const r=rings[i];r.u=u;
+    if(!P(cx+tmp.rx*hw,cy+tmp.ry*hw,cz+tmp.rz*hw,pts[0]||(pts[0]={x:0,y:0,z:0}))||
+       !P(cx-tmp.rx*hw,cy-tmp.ry*hw,cz-tmp.rz*hw,pts[1]||(pts[1]={x:0,y:0,z:0}))||
+       !P(cx+tmp.ux*hh,cy+tmp.uy*hh,cz+tmp.uz*hh,pts[2]||(pts[2]={x:0,y:0,z:0}))||
+       !P(cx-tmp.ux*hh*.92,cy-tmp.uy*hh*.92,cz-tmp.uz*hh*.92,pts[3]||(pts[3]={x:0,y:0,z:0}))||
+       !P(cx,cy,cz,pts[4]||(pts[4]={x:0,y:0,z:0})))return;
+    r.lx=pts[0].x;r.ly=pts[0].y;r.lz=pts[0].z;r.rx=pts[1].x;r.ry=pts[1].y;r.rz=pts[1].z;r.tx=pts[2].x;r.ty=pts[2].y;r.tz=pts[2].z;
+    r.bx=pts[3].x;r.by=pts[3].y;r.bz=pts[3].z;r.cx=pts[4].x;r.cy=pts[4].y;r.cz=pts[4].z;
+  }
+  for(let i=0;i<seg;i++){
+    const a=rings[i],b=rings[i+1],k=i/(seg-1);
+    const topQ=[{x:a.tx,y:a.ty},{x:b.tx,y:b.ty},{x:b.rx,y:b.ry},{x:a.rx,y:a.ry}],
+          sideQ=[{x:a.lx,y:a.ly},{x:b.lx,y:b.ly},{x:b.tx,y:b.ty},{x:a.tx,y:a.ty}],
+          lowQ=[{x:a.bx,y:a.by},{x:b.bx,y:b.by},{x:b.rx,y:b.ry},{x:a.rx,y:a.ry}],
+          deepQ=[{x:a.lx,y:a.ly},{x:b.lx,y:b.ly},{x:b.bx,y:b.by},{x:a.bx,y:a.by}];
+    job(()=>poly(topQ,rgb(f.c2,.55-k*.08),"rgba(255,255,255,.08)",1),(a.tz+b.tz+a.rz+b.rz)*.25);
+    job(()=>poly(sideQ,rgb(f.c1,.56-k*.08),"rgba(255,255,255,.07)",1),(a.lz+b.lz+a.tz+b.tz)*.25);
+    job(()=>poly(lowQ,"rgba(15,42,55,.26)",null,1),(a.bz+b.bz+a.rz+b.rz)*.25);
+    job(()=>poly(deepQ,rgb(f.c1,.33-k*.05),null,1),(a.lz+b.lz+a.bz+b.bz)*.25);
+  }
+  const outline=[];for(let i=0;i<=seg;i++)outline.push({x:rings[i].lx,y:rings[i].ly,z:rings[i].lz});for(let i=seg;i>=0;i--)outline.push({x:rings[i].rx,y:rings[i].ry,z:rings[i].rz});
+  const oz=outline.reduce((s,p)=>s+p.z,0)/outline.length;job(()=>poly(outline,null,"rgba(255,255,255,.14)",1),oz-.01);
+  const hi=[];for(let i=2;i<seg-1;i++)hi.push({x:rings[i].tx,y:rings[i].ty,z:rings[i].tz});job(()=>poly(hi,null,"rgba(255,255,255,.16)",1),hi.reduce((s,p)=>s+p.z,0)/hi.length-.02);
+
+  const dorsal=[],baseTop=[];for(let i=0;i<=seg;i++){const r=rings[i],u=r.u;if(u<.25||u>.78)continue;
+    const shape=Math.sin((u-.25)/.53*PI),bh=f.h*Math.sin(PI*Math.pow(u,.8))*(1-Math.pow(Math.max(0,(u-.72)/.28),1.2)),lift=shape*(f.h*.36),fl=Math.sin(t*finHz+u*8+f.dp)*.06;
+    const sx=bx+tmp.fx*(u*f.len),sy=by+tmp.fy*(u*f.len),sz=bz+tmp.fz*(u*f.len);
+    if(P(sx+tmp.ux*(bh+lift+fl+f.h*.05),sy+tmp.uy*(bh+lift+fl+f.h*.05),sz+tmp.uz*(bh+lift+fl+f.h*.05),pts[5]||(pts[5]={x:0,y:0,z:0}))){
+      dorsal.push({x:pts[5].x,y:pts[5].y,z:pts[5].z});baseTop.push({x:r.tx,y:r.ty,z:r.tz});
+    }
+  }
+  if(dorsal.length>3){const fin=dorsal.concat(baseTop.reverse()),fz=fin.reduce((s,p)=>s+p.z,0)/fin.length;job(()=>poly(fin,rgb(f.c2,.42),"rgba(255,255,255,.2)",1),fz)}
+
+  const m=0.68,mx=bx+tmp.fx*(m*f.len),my=by+tmp.fy*(m*f.len),mz=bz+tmp.fz*(m*f.len),swing=Math.sin(t*pecHz+f.pp)*.14;
+  const finL=[{}, {}, {}],finR=[{}, {}, {}];
+  if(P(mx,my,mz,finL[0])&&P(mx+tmp.rx*f.wd*1.2+tmp.ux*swing,my+tmp.ry*f.wd*1.2+tmp.uy*swing,mz+tmp.rz*f.wd*1.2+tmp.uz*swing,finL[1])&&P(mx-tmp.fx*f.len*.08,my-tmp.fy*f.len*.08,mz-tmp.fz*f.len*.08,finL[2]))
+    job(()=>poly(finL,rgb(f.c2,.36),"rgba(255,255,255,.14)",1),(finL[0].z+finL[1].z+finL[2].z)/3);
+  if(P(mx,my,mz,finR[0])&&P(mx-tmp.rx*f.wd*1.2-tmp.ux*swing,my-tmp.ry*f.wd*1.2-tmp.uy*swing,mz-tmp.rz*f.wd*1.2-tmp.uz*swing,finR[1])&&P(mx-tmp.fx*f.len*.08,my-tmp.fy*f.len*.08,mz-tmp.fz*f.len*.08,finR[2]))
+    job(()=>poly(finR,rgb(f.c2,.36),"rgba(255,255,255,.14)",1),(finR[0].z+finR[1].z+finR[2].z)/3);
+
+  const tr=0.08,tx=bx+tmp.fx*(tr*f.len),ty=by+tmp.fy*(tr*f.len),tz=bz+tmp.fz*(tr*f.len),sw=Math.sin(t*(bodyHz*1.2)+f.p)*amp*3.2;
+  const ox=tx-tmp.fx*f.len*.28+tmp.rx*sw,oy=ty-tmp.fy*f.len*.28+tmp.ry*sw,oz2=tz-tmp.fz*f.len*.28+tmp.rz*sw,tail=[{}, {}, {}];
+  if(P(tx,ty,tz,tail[0])&&P(ox+tmp.ux*f.h*.56,oy+tmp.uy*f.h*.56,oz2+tmp.uz*f.h*.56,tail[1])&&P(ox-tmp.ux*f.h*.56,oy-tmp.uy*f.h*.56,oz2-tmp.uz*f.h*.56,tail[2]))
+    job(()=>poly(tail,rgb(f.c2,.8),"rgba(255,255,255,.2)",1),(tail[0].z+tail[1].z+tail[2].z)/3);
+
+  const hx=bx+tmp.fx*(f.len*.86),hy=by+tmp.fy*(f.len*.86),hz= bz+tmp.fz*(f.len*.86),el={},er={};
+  if(P(hx+tmp.rx*f.wd*.58+tmp.ux*f.h*.13,hy+tmp.ry*f.wd*.58+tmp.uy*f.h*.13,hz+tmp.rz*f.wd*.58+tmp.uz*f.h*.13,el))
+    job(()=>{x.fillStyle="#09111a";x.beginPath();x.arc(el.x,el.y,C(5/el.z,1.2,2.4),0,T);x.fill()},el.z);
+  if(P(hx-tmp.rx*f.wd*.58+tmp.ux*f.h*.13,hy-tmp.ry*f.wd*.58+tmp.uy*f.h*.13,hz-tmp.rz*f.wd*.58+tmp.uz*f.h*.13,er))
+    job(()=>{x.fillStyle="#09111a";x.beginPath();x.arc(er.x,er.y,C(5/er.z,1.2,2.4),0,T);x.fill()},er.z);
+}
+
+// [RU] Каустики: мягкие световые линии внутри заданного полигона.
+// [EN] Caustics: soft light streaks clipped to a polygon.
+function caustics(polyPts,t,s){
+  x.save();x.beginPath();x.moveTo(polyPts[0].x,polyPts[0].y);for(let i=1;i<polyPts.length;i++)x.lineTo(polyPts[i].x,polyPts[i].y);x.closePath();x.clip();
+  x.globalCompositeOperation="lighter";
+  for(let i=0;i<18;i++){const y=L(polyPts[0].y,polyPts[2].y,i/17)+Math.sin(t*1.5+i*.8)*8,w=Math.sin(t*1.3+i*1.1)*28;
+    x.beginPath();x.moveTo(polyPts[0].x-40,y);x.bezierCurveTo(polyPts[0].x+w,y-8,polyPts[2].x-w,y+8,polyPts[2].x+40,y+Math.sin(i+t)*6);
+    x.strokeStyle=`rgba(190,245,255,${s})`;x.lineWidth=1.2+Math.sin(t*2+i)*.4;x.stroke()
+  }
+  x.globalCompositeOperation="source-over";x.restore();
+}
+// [RU] Псевдо-рефракция: вертикальные дрейфующие блики по передней стенке.
+// [EN] Pseudo-refraction: drifting vertical highlights on front glass wall.
+function refract(polyPts,t){
+  x.save();x.beginPath();x.moveTo(polyPts[0].x,polyPts[0].y);for(let i=1;i<polyPts.length;i++)x.lineTo(polyPts[i].x,polyPts[i].y);x.closePath();x.clip();
+  for(let i=0;i<26;i++){const sx=L(polyPts[0].x,polyPts[1].x,i/25),d=Math.sin(t*1.8+i*.9)*7;
+    x.beginPath();x.moveTo(sx+d,polyPts[0].y-10);x.lineTo(sx-d*.5,polyPts[2].y+10);x.strokeStyle=`rgba(205,247,255,${.03+Math.sin(t+i)*.01})`;x.lineWidth=1;x.stroke()
+  }
+  x.restore();
+}
+
+// [RU] Рендер аквариума:
+//      - каркас/стекло
+//      - поверхность воды
+//      - каустики на дне
+//      - рефракция на фронтальной грани
+// [EN] Render aquarium:
+//      - glass frame
+//      - water top plane
+//      - floor caustics
+//      - front-face refraction
+function renderTank(t){
+  const hw=tank.w*.5,hh=tank.h,hd=tank.d*.5;
+  const corners=[[-hw,0,-hd],[hw,0,-hd],[hw,0,hd],[-hw,0,hd],[-hw,hh,-hd],[hw,hh,-hd],[hw,hh,hd],[-hw,hh,hd]];
+  const p=corners.map(()=>({x:0,y:0,z:0}));for(let i=0;i<8;i++)if(!P(corners[i][0],corners[i][1],corners[i][2],p[i]))return;
+  const faces=[[0,1,5,4],[1,2,6,5],[2,3,7,6],[3,0,4,7],[4,5,6,7]];
+  let front=null,fd=1e9;
+  for(let k=0;k<faces.length;k++){
+    const f=faces[k],q=[p[f[0]],p[f[1]],p[f[2]],p[f[3]]],z=(q[0].z+q[1].z+q[2].z+q[3].z)/4;
+    job(()=>poly(q,"rgba(92,196,226,.08)","rgba(170,240,255,.35)",1),z);
+    if(k<4&&z<fd){fd=z;front=q}
+  }
+  const wy=hh-.14+Math.sin(t*.7)*.03,water=[{}, {}, {}, {}];
+  if(P(-hw+.06,wy,-hd+.06,water[0])&&P(hw-.06,wy,-hd+.06,water[1])&&P(hw-.06,wy,hd-.06,water[2])&&P(-hw+.06,wy,hd-.06,water[3])){
+    const z=(water[0].z+water[1].z+water[2].z+water[3].z)/4;job(()=>poly(water,"rgba(105,224,244,.2)","rgba(210,248,255,.35)",1),z)
+  }
+  const floor=[{}, {}, {}, {}];
+  if(P(-hw+.05,.01,-hd+.05,floor[0])&&P(hw-.05,.01,-hd+.05,floor[1])&&P(hw-.05,.01,hd-.05,floor[2])&&P(-hw+.05,.01,hd-.05,floor[3])){
+    const z=(floor[0].z+floor[1].z+floor[2].z+floor[3].z)/4;job(()=>caustics(floor,t,.18),z-.02)
+  }
+  if(front)job(()=>refract(front,t),fd-.01);
+}
+// [RU] Рендер растений (синусоидальная анимация стеблей).
+// [EN] Render plants (sinusoidal stem animation).
+function renderPlants(t){
+  for(let i=0;i<plants.length;i++){
+    const p=plants[i],a=[];for(let j=0;j<7;j++){const u=j/6,s=Math.sin(t*1.3+p.p+u*2.2)*.08*u,z=Math.cos(t*1.1+p.p+u)*.05*u,o={x:0,y:0,z:0};
+      if(!P(p.x+s,u*p.h,p.z+z,o)){a.length=0;break}a.push(o)}
+    if(a.length<2)continue;const z=a.reduce((s,q)=>s+q.z,0)/a.length;
+    job(()=>{x.beginPath();x.moveTo(a[0].x,a[0].y);for(let k=1;k<a.length;k++)x.lineTo(a[k].x,a[k].y);x.strokeStyle="rgba(98,210,130,.65)";x.lineWidth=2;x.stroke()},z);
+  }
+}
+// [RU] Обновление пузырьков (подъем + боковой дрейф + респавн снизу).
+// [EN] Bubble update (rising + sideways drift + bottom respawn).
+function updateBubbles(dt,t){for(let i=0;i<bubbles.length;i++){const b=bubbles[i];b.y+=b.s*dt;b.x+=Math.sin(t*.8+b.p+b.y*2)*dt*b.w;b.z+=Math.cos(t*.9+b.p+b.y*1.5)*dt*b.w*.7;if(b.y>tank.h-.12){b.y=R(.05,.25);b.x=R(-half.x,half.x);b.z=R(-half.z,half.z)}}}
+// [RU] Рендер пузырьков как экранных окружностей с depth-сортировкой.
+// [EN] Render bubbles as projected circles with depth sorting.
+function renderBubbles(){for(let i=0;i<bubbles.length;i++){const b=bubbles[i],p={x:0,y:0,z:0};if(!P(b.x,b.y,b.z,p))continue;job(()=>{x.beginPath();x.arc(p.x,p.y,C(18/p.z,.7,3.8),0,T);x.strokeStyle="rgba(188,245,255,.55)";x.lineWidth=1;x.stroke()},p.z)}}
+// [RU] Жесткое устранение пересечений рыб:
+//      positional correction + небольшая импульсная коррекция скорости.
+// [EN] Hard fish overlap solver:
+//      positional correction + small velocity impulse.
+function resolveOverlaps(){
+  for(let it=0;it<2;it++){
+    for(let i=0;i<fishes.length;i++){
+      const a=fishes[i];
+      for(let j=i+1;j<fishes.length;j++){
+        const b=fishes[j],dx=a.x-b.x,dy=a.y-b.y,dz=a.z-b.z,d=Math.hypot(dx,dy,dz)||1e-6,minD=a.rad+b.rad;
+        if(d>=minD)continue;
+        const push=(minD-d)*.5+1e-4,nx=dx/d,ny=dy/d,nz=dz/d;
+        a.x+=nx*push;a.y+=ny*push;a.z+=nz*push;
+        b.x-=nx*push;b.y-=ny*push;b.z-=nz*push;
+        a.vx+=nx*push*2;a.vy+=ny*push*2;a.vz+=nz*push*2;
+        b.vx-=nx*push*2;b.vy-=ny*push*2;b.vz-=nz*push*2;
+      }
+      const minX=-half.x+a.rad,maxX=half.x-a.rad,minY=.02+a.rad,maxY=half.y-a.rad,minZ=-half.z+a.rad,maxZ=half.z-a.rad;
+      a.x=C(a.x,minX,maxX);a.y=C(a.y,minY,maxY);a.z=C(a.z,minZ,maxZ);
+    }
+  }
+}
+// [RU] Подводный фон + глобальные каустики.
+// [EN] Underwater background + global caustic layer.
+function bg(t){
+  const g=x.createRadialGradient(W*.5,H*.22,H*.06,W*.5,H*.7,H*.95);g.addColorStop(0,"#0e3f67");g.addColorStop(.5,"#032644");g.addColorStop(1,"#021225");
+  x.fillStyle=g;x.fillRect(0,0,W,H);x.fillStyle="rgba(68,169,214,.08)";for(let i=0;i<7;i++){const y=i/6*H+wSin(t*.8+i*.9)*15;x.fillRect(0,y,W,2)}
+  caustics([{x:0,y:0},{x:W,y:0},{x:W,y:H},{x:0,y:H}],t*.6,.035);
+}
+const wSin=Math.sin;
+let prev=performance.now();
+// [RU] Основной цикл:
+//      update -> resolve overlaps -> project/render -> depth sort -> draw.
+// [EN] Main loop:
+//      update -> resolve overlaps -> project/render -> depth sort -> draw.
+function frame(now){
+  const dt=Math.min((now-prev)*.001,.033),t=now*.001;prev=now;
+  for(let i=0;i<fishes.length;i++)updFish(fishes[i],dt,t);
+  resolveOverlaps();
+  updateBubbles(dt,t);basis();jobs.length=0;
+  bg(t);renderTank(t);renderPlants(t);renderBubbles();for(let i=0;i<fishes.length;i++)renderFish(fishes[i],t);
+  jobs.sort((a,b)=>b.z-a.z);for(let i=0;i<jobs.length;i++)jobs[i].fn();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+// Author signature / Авторская подпись: Nikolai (Codex AI), 2026
+</script>
+</body>
+</html>
