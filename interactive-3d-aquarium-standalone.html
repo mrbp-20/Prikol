@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Standalone 3D Aquarium</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #021225; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .hud {
+      position: fixed; top: 12px; left: 12px; color: #d6f7ff; font: 12px/1.35 system-ui, sans-serif;
+      background: rgba(4, 22, 35, 0.45); border: 1px solid rgba(170, 233, 255, 0.2);
+      border-radius: 10px; padding: 8px 10px; pointer-events: none; user-select: none;
+      backdrop-filter: blur(4px);
+    }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="hud">Перетаскивание: орбита • Колесо: зум</div>
+  <script>
+    "use strict";
+
+    const canvas = document.getElementById("c");
+    const ctx = canvas.getContext("2d", { alpha: false });
+
+    const TAU = Math.PI * 2;
+    const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+    const lerp = (a, b, t) => a + (b - a) * t;
+    const rand = (a, b) => a + Math.random() * (b - a);
+
+    function v3(x = 0, y = 0, z = 0) { return { x, y, z }; }
+    function add(a, b) { return { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z }; }
+    function sub(a, b) { return { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z }; }
+    function mul(a, s) { return { x: a.x * s, y: a.y * s, z: a.z * s }; }
+    function dot(a, b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+    function cross(a, b) { return { x: a.y * b.z - a.z * b.y, y: a.z * b.x - a.x * b.z, z: a.x * b.y - a.y * b.x }; }
+    function len(a) { return Math.hypot(a.x, a.y, a.z); }
+    function norm(a) { const l = len(a) || 1; return { x: a.x / l, y: a.y / l, z: a.z / l }; }
+
+    const tank = { w: 7.2, h: 4.2, d: 3.8 };
+    const half = { x: tank.w * 0.5 - 0.2, y: tank.h - 0.2, z: tank.d * 0.5 - 0.2 };
+    const fishPalette = [
+      ["#ff8a5b", "#ffd56d"],
+      ["#63c9ff", "#a6ffe2"],
+      ["#ff76bb", "#ffd48f"],
+      ["#8f8aff", "#73ebff"],
+      ["#75e38e", "#ddff8a"],
+      ["#ffd06d", "#ff8f6e"]
+    ];
+
+    const camera = {
+      target: v3(0, 1.8, 0),
+      yaw: 0.45,
+      pitch: 0.22,
+      distance: 12,
+      fov: 60 * Math.PI / 180
+    };
+
+    let W = 1, H = 1, DPR = 1;
+    function resize() {
+      DPR = Math.min(window.devicePixelRatio || 1, 2);
+      W = Math.floor(innerWidth);
+      H = Math.floor(innerHeight);
+      canvas.width = Math.floor(W * DPR);
+      canvas.height = Math.floor(H * DPR);
+      ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    }
+    addEventListener("resize", resize);
+    resize();
+
+    let drag = false, lx = 0, ly = 0;
+    canvas.addEventListener("mousedown", e => { drag = true; lx = e.clientX; ly = e.clientY; });
+    addEventListener("mouseup", () => drag = false);
+    addEventListener("mousemove", e => {
+      if (!drag) return;
+      const dx = (e.clientX - lx) * 0.005;
+      const dy = (e.clientY - ly) * 0.005;
+      lx = e.clientX; ly = e.clientY;
+      camera.yaw -= dx;
+      camera.pitch = clamp(camera.pitch - dy, -1.25, 1.25);
+    });
+    addEventListener("wheel", e => {
+      camera.distance = clamp(camera.distance * (1 + Math.sign(e.deltaY) * 0.08), 6, 22);
+      e.preventDefault();
+    }, { passive: false });
+
+    function cameraBasis() {
+      const cp = Math.cos(camera.pitch), sp = Math.sin(camera.pitch);
+      const cy = Math.cos(camera.yaw), sy = Math.sin(camera.yaw);
+      const eye = v3(
+        camera.target.x + camera.distance * cp * sy,
+        camera.target.y + camera.distance * sp,
+        camera.target.z + camera.distance * cp * cy
+      );
+      const forward = norm(sub(camera.target, eye));
+      const right = norm(cross(forward, v3(0, 1, 0)));
+      const up = cross(right, forward);
+      return { eye, forward, right, up };
+    }
+
+    function project(p, cb) {
+      const rel = sub(p, cb.eye);
+      const x = dot(rel, cb.right);
+      const y = dot(rel, cb.up);
+      const z = dot(rel, cb.forward);
+      if (z <= 0.05) return null;
+      const f = (H * 0.5) / Math.tan(camera.fov * 0.5);
+      return { x: W * 0.5 + x * f / z, y: H * 0.5 - y * f / z, z };
+    }
+
+    const plants = Array.from({ length: 20 }, () => ({
+      x: rand(-tank.w * 0.46, tank.w * 0.46),
+      z: rand(-tank.d * 0.46, tank.d * 0.46),
+      h: rand(0.6, 1.8),
+      phase: rand(0, TAU)
+    }));
+
+    const bubbles = Array.from({ length: 120 }, () => ({
+      x: rand(-half.x, half.x),
+      y: rand(0.15, half.y),
+      z: rand(-half.z, half.z),
+      speed: rand(0.2, 0.5),
+      sway: rand(0.1, 0.35),
+      phase: rand(0, TAU)
+    }));
+
+    const fishes = Array.from({ length: 9 }, (_, i) => {
+      const pal = fishPalette[i % fishPalette.length];
+      const size = rand(0.78, 1.25);
+      const vel = norm(v3(rand(-1, 1), rand(-0.25, 0.25), rand(-1, 1)));
+      return {
+        pos: v3(rand(-half.x * 0.8, half.x * 0.8), rand(0.7, half.y - 0.3), rand(-half.z * 0.8, half.z * 0.8)),
+        vel: mul(vel, rand(0.5, 1.0)),
+        desired: v3(),
+        burst: 1,
+        burstT: rand(0.5, 5),
+        wander: rand(0, TAU),
+        bank: 0,
+        phase: rand(0, TAU),
+        size,
+        length: size * rand(0.95, 1.2),
+        bodyH: size * rand(0.32, 0.42),
+        bodyW: size * rand(0.2, 0.3),
+        baseSpeed: rand(0.35, 0.6),
+        maxSpeed: rand(1.1, 1.8),
+        c1: pal[0],
+        c2: pal[1]
+      };
+    });
+
+    function updateFish(f, dt, t) {
+      f.wander += dt * (0.7 + f.baseSpeed);
+      f.burstT -= dt;
+      if (f.burstT <= 0) {
+        f.burstT = rand(2.2, 6.6);
+        f.burst = rand(1.1, 1.8);
+      } else {
+        f.burst = lerp(f.burst, 1, dt * 0.8);
+      }
+
+      const p = f.pos;
+      const margin = 0.55;
+      const boundary = v3();
+      if (p.x > half.x - margin) boundary.x -= ((p.x - (half.x - margin)) / margin) * 2.2;
+      if (p.x < -half.x + margin) boundary.x += (((-half.x + margin) - p.x) / margin) * 2.2;
+      if (p.y > half.y - margin) boundary.y -= ((p.y - (half.y - margin)) / margin) * 2.0;
+      if (p.y < 0.35 + margin * 0.2) boundary.y += (((0.35 + margin * 0.2) - p.y) / margin) * 1.8;
+      if (p.z > half.z - margin) boundary.z -= ((p.z - (half.z - margin)) / margin) * 2.2;
+      if (p.z < -half.z + margin) boundary.z += (((-half.z + margin) - p.z) / margin) * 2.2;
+
+      const wander = v3(
+        Math.cos(f.wander) * 0.42,
+        Math.sin(t * 0.9 + f.phase) * 0.12,
+        Math.sin(f.wander * 0.78) * 0.35
+      );
+      const center = v3(-p.x * 0.08, (tank.h * 0.53 - p.y) * 0.06, -p.z * 0.08);
+
+      let sep = v3(), ali = v3(), coh = v3(), n = 0;
+      for (const o of fishes) {
+        if (o === f) continue;
+        const dV = sub(p, o.pos);
+        const d = len(dV);
+        if (d < 1.2 && d > 0.001) sep = add(sep, mul(norm(dV), (1.2 - d) * 0.9));
+        if (d < 2.4) { ali = add(ali, o.vel); coh = add(coh, o.pos); n++; }
+      }
+      if (n > 0) {
+        ali = mul(norm(ali), 0.2);
+        coh = mul(sub(mul(coh, 1 / n), p), 0.06);
+      }
+
+      f.desired = add(add(add(add(add(center, wander), boundary), mul(sep, 0.45)), ali), coh);
+      f.vel = add(f.vel, mul(f.desired, dt * 0.95));
+
+      const desiredSpeed = f.baseSpeed * f.burst + len(f.desired) * 0.2;
+      const speed = clamp(len(f.vel), 0.2, f.maxSpeed);
+      f.vel = mul(norm(f.vel), lerp(speed, desiredSpeed, dt * 1.8));
+
+      f.pos = add(f.pos, mul(f.vel, dt));
+      f.pos.x = clamp(f.pos.x, -half.x, half.x);
+      f.pos.y = clamp(f.pos.y, 0.3, half.y);
+      f.pos.z = clamp(f.pos.z, -half.z, half.z);
+
+      f.bank = lerp(f.bank, clamp((f.desired.x * 0.35 + f.desired.z * 0.2), -0.8, 0.8), dt * 1.9);
+    }
+
+    function drawPoly(points, fill, stroke, lw = 1) {
+      if (points.length < 2) return;
+      ctx.beginPath();
+      ctx.moveTo(points[0].x, points[0].y);
+      for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
+      if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+      if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); }
+    }
+    function polyPath(points) {
+      if (points.length < 2) return;
+      ctx.beginPath();
+      ctx.moveTo(points[0].x, points[0].y);
+      for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
+      ctx.closePath();
+    }
+
+    function rgba(hex, a) {
+      const c = hex.replace("#", "");
+      const n = parseInt(c, 16);
+      const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+      return `rgba(${r},${g},${b},${a})`;
+    }
+
+    function fishFrame(f) {
+      const forward = norm(f.vel);
+      let up = v3(0, 1, 0);
+      let right = cross(forward, up);
+      if (len(right) < 1e-3) right = v3(1, 0, 0);
+      right = norm(right);
+      up = norm(cross(right, forward));
+      // Bank the fish around forward axis when steering.
+      const s = Math.sin(f.bank * 0.65), c = Math.cos(f.bank * 0.65);
+      const r2 = add(mul(right, c), mul(up, s));
+      const u2 = add(mul(up, c), mul(right, -s));
+      return { forward, right: r2, up: u2 };
+    }
+
+    function renderFish(f, cb, t, jobs) {
+      const F = fishFrame(f);
+      const speed = len(f.vel);
+      const amp = 0.08 + speed * 0.08;
+      const seg = 16;
+      const rings = [];
+      const centers = [];
+      const base = sub(f.pos, mul(F.forward, f.length * 0.5));
+      for (let i = 0; i <= seg; i++) {
+        const u = i / seg;
+        const x = (u - 0.5) * f.length;
+        const body = Math.sin(Math.PI * Math.pow(u, 0.8));
+        const tailMask = Math.max(0, (u - 0.35) / 0.65);
+        const wave = Math.sin(t * (3 + speed * 4.8) - u * 9.2 + f.phase) * amp * tailMask;
+        const yWave = Math.cos(t * (2 + speed * 2.1) - u * 6.4 + f.phase) * amp * 0.15 * tailMask;
+        const center = add(add(add(base, mul(F.forward, x + f.length * 0.5)), mul(F.right, wave)), mul(F.up, yWave));
+        const hw = f.bodyW * body * (1 - Math.pow(Math.max(0, (u - 0.7) / 0.3), 1.3));
+        const hh = f.bodyH * body * (1 - Math.pow(Math.max(0, (u - 0.72) / 0.28), 1.2));
+        const l = project(add(center, mul(F.right, hw)), cb);
+        const r = project(add(center, mul(F.right, -hw)), cb);
+        const top = project(add(center, mul(F.up, hh)), cb);
+        const bot = project(add(center, mul(F.up, -hh * 0.92)), cb);
+        const cp = project(center, cb);
+        if (!l || !r || !top || !bot || !cp) return;
+        rings.push({ l, r, top, bot, c: cp, u });
+        centers.push({
+          p: cp,
+          u,
+          top
+        });
+      }
+      if (rings.length < 2 || centers.some(c => !c.p || !c.top)) return;
+
+      for (let i = 0; i < rings.length - 1; i++) {
+        const a = rings[i], b = rings[i + 1];
+        const topQ = [a.top, b.top, b.r, a.r];
+        const sideQ = [a.l, b.l, b.top, a.top];
+        const lowQ = [a.bot, b.bot, b.r, a.r];
+        const deepQ = [a.l, b.l, b.bot, a.bot];
+        const zTop = (a.top.z + b.top.z + a.r.z + b.r.z) * 0.25;
+        const zSide = (a.l.z + b.l.z + a.top.z + b.top.z) * 0.25;
+        const zLow = (a.bot.z + b.bot.z + a.r.z + b.r.z) * 0.25;
+        const zDeep = (a.l.z + b.l.z + a.bot.z + b.bot.z) * 0.25;
+        const k = i / (rings.length - 2 || 1);
+        jobs.push(() => drawPoly(topQ, rgba(f.c2, 0.55 - k * 0.08), rgba("#ffffff", 0.08), 1), zTop);
+        jobs.push(() => drawPoly(sideQ, rgba(f.c1, 0.56 - k * 0.08), rgba("#ffffff", 0.07), 1), zSide);
+        jobs.push(() => drawPoly(lowQ, rgba("#0f2a37", 0.26), null, 1), zLow);
+        jobs.push(() => drawPoly(deepQ, rgba(f.c1, 0.33 - k * 0.05), null, 1), zDeep);
+      }
+
+      const contourL = rings.map(r => r.l);
+      const contourR = rings.map(r => r.r).reverse();
+      const bodySil = contourL.concat(contourR);
+      const silDepth = bodySil.reduce((s, p) => s + p.z, 0) / bodySil.length;
+      jobs.push(() => drawPoly(bodySil, null, rgba("#ffffff", 0.14), 1), silDepth - 0.01);
+
+      const hi = centers.slice(2, centers.length - 2).map(c => c.top);
+      const hiDepth = hi.reduce((s, p) => s + p.z, 0) / hi.length;
+      jobs.push(() => drawPoly(hi, null, rgba("#ffffff", 0.16), 1), hiDepth - 0.02);
+
+      const dorsal = [];
+      for (const c of centers) {
+        if (c.u < 0.25 || c.u > 0.78) continue;
+        const shape = Math.sin((c.u - 0.25) / 0.53 * Math.PI);
+        const bodyTop = f.bodyH * Math.sin(Math.PI * Math.pow(c.u, 0.8)) * (1 - Math.pow(Math.max(0, (c.u - 0.72) / 0.28), 1.2));
+        const lift = shape * (f.bodyH * 0.36);
+        const flap = Math.sin(t * (5.3 + speed * 3) + c.u * 8 + f.phase) * 0.06;
+        // Start from body surface and push fin further outward along "up".
+        const tip = project(
+          add(
+            add(sub(f.pos, mul(F.forward, f.length * 0.5)), mul(F.forward, c.u * f.length)),
+            mul(F.up, bodyTop + lift + flap + f.bodyH * 0.05)
+          ),
+          cb
+        );
+        if (tip) dorsal.push(tip);
+      }
+      if (dorsal.length > 3) {
+        const baseTop = centers.filter(c => c.u >= 0.25 && c.u <= 0.78).map(c => c.top).reverse();
+        const finPoly = dorsal.concat(baseTop);
+        const d = finPoly.reduce((s, p) => s + p.z, 0) / finPoly.length;
+        jobs.push(() => drawPoly(finPoly, rgba(f.c2, 0.42), rgba("#ffffff", 0.2), 1), d);
+      }
+
+      // u=0 is rear, u=1 is front (towards velocity vector).
+      const tailRoot = add(base, mul(F.forward, f.length * 0.08));
+      const swing = Math.sin(t * (5 + speed * 5) + f.phase) * amp * 3.2;
+      // Tail is now attached by a single vertex (angle) at the body.
+      const tailOuter = add(add(tailRoot, mul(F.forward, -f.length * 0.28)), mul(F.right, swing));
+      const tailA = add(tailOuter, mul(F.up, f.bodyH * 0.56));
+      const tailB = add(tailOuter, mul(F.up, -f.bodyH * 0.56));
+      const pRoot = project(tailRoot, cb), p0 = project(tailA, cb), p1 = project(tailB, cb);
+      if (pRoot && p0 && p1) {
+        jobs.push(() => drawPoly([pRoot, p0, p1], rgba(f.c2, 0.8), rgba("#ffffff", 0.2), 1), (pRoot.z + p0.z + p1.z) / 3);
+      }
+
+      const mid = add(base, mul(F.forward, f.length * 0.68));
+      const finSwing = Math.sin(t * (7 + speed * 3.5) + f.phase) * 0.14;
+      const finL = [project(mid, cb), project(add(add(mid, mul(F.right, f.bodyW * 1.2)), mul(F.up, finSwing)), cb), project(add(mid, mul(F.forward, -f.length * 0.08)), cb)];
+      const finR = [project(mid, cb), project(add(add(mid, mul(F.right, -f.bodyW * 1.2)), mul(F.up, -finSwing)), cb), project(add(mid, mul(F.forward, -f.length * 0.08)), cb)];
+      if (finL.every(Boolean)) jobs.push(() => drawPoly(finL, rgba(f.c2, 0.36), rgba("#ffffff", 0.14), 1), (finL[0].z + finL[1].z + finL[2].z) / 3);
+      if (finR.every(Boolean)) jobs.push(() => drawPoly(finR, rgba(f.c2, 0.36), rgba("#ffffff", 0.14), 1), (finR[0].z + finR[1].z + finR[2].z) / 3);
+
+      const head = add(base, mul(F.forward, f.length * 0.86));
+      const eyeL = project(add(add(head, mul(F.right, f.bodyW * 0.58)), mul(F.up, f.bodyH * 0.13)), cb);
+      const eyeR = project(add(add(head, mul(F.right, -f.bodyW * 0.58)), mul(F.up, f.bodyH * 0.13)), cb);
+      if (eyeL) jobs.push(() => { ctx.fillStyle = "#09111a"; ctx.beginPath(); ctx.arc(eyeL.x, eyeL.y, clamp(5 / eyeL.z, 1.2, 2.4), 0, TAU); ctx.fill(); }, eyeL.z);
+      if (eyeR) jobs.push(() => { ctx.fillStyle = "#09111a"; ctx.beginPath(); ctx.arc(eyeR.x, eyeR.y, clamp(5 / eyeR.z, 1.2, 2.4), 0, TAU); ctx.fill(); }, eyeR.z);
+    }
+
+    function renderTank(cb, t, jobs) {
+      const hw = tank.w * 0.5, hh = tank.h, hd = tank.d * 0.5;
+      const corners = [
+        v3(-hw, 0, -hd), v3(hw, 0, -hd), v3(hw, 0, hd), v3(-hw, 0, hd),
+        v3(-hw, hh, -hd), v3(hw, hh, -hd), v3(hw, hh, hd), v3(-hw, hh, hd)
+      ];
+      const P = corners.map(p => project(p, cb));
+      const faces = [
+        [0, 1, 5, 4], [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7], [4, 5, 6, 7]
+      ];
+      let frontFace = null;
+      let frontDepth = 1e9;
+      for (const f of faces) {
+        if (f.some(i => !P[i])) continue;
+        const poly = f.map(i => P[i]);
+        const depth = poly.reduce((s, p) => s + p.z, 0) / poly.length;
+        jobs.push(() => drawPoly(poly, "rgba(92,196,226,0.08)", "rgba(170,240,255,0.35)", 1), depth);
+        if (depth < frontDepth && f !== faces[4]) {
+          frontDepth = depth;
+          frontFace = poly;
+        }
+      }
+
+      const wY = hh - 0.14 + Math.sin(t * 0.7) * 0.03;
+      const water = [v3(-hw + 0.06, wY, -hd + 0.06), v3(hw - 0.06, wY, -hd + 0.06), v3(hw - 0.06, wY, hd - 0.06), v3(-hw + 0.06, wY, hd - 0.06)]
+        .map(p => project(p, cb));
+      if (water.every(Boolean)) {
+        const d = water.reduce((s, p) => s + p.z, 0) / 4;
+        jobs.push(() => drawPoly(water, "rgba(105,224,244,0.2)", "rgba(210,248,255,0.35)", 1), d);
+      }
+      const floor = [v3(-hw + 0.05, 0.01, -hd + 0.05), v3(hw - 0.05, 0.01, -hd + 0.05), v3(hw - 0.05, 0.01, hd - 0.05), v3(-hw + 0.05, 0.01, hd - 0.05)]
+        .map(p => project(p, cb));
+      if (floor.every(Boolean)) {
+        const d = floor.reduce((s, p) => s + p.z, 0) / 4;
+        jobs.push(() => drawCaustics(floor, t, 0.18), d - 0.02);
+      }
+      if (frontFace) {
+        jobs.push(() => drawRefraction(frontFace, t), frontDepth - 0.01);
+      }
+    }
+
+    function drawCaustics(poly, t, strength) {
+      ctx.save();
+      polyPath(poly);
+      ctx.clip();
+      ctx.globalCompositeOperation = "lighter";
+      for (let i = 0; i < 18; i++) {
+        const y = lerp(poly[0].y, poly[2].y, i / 17) + Math.sin(t * 1.5 + i * 0.8) * 8;
+        const wob = Math.sin(t * 1.3 + i * 1.1) * 28;
+        ctx.beginPath();
+        ctx.moveTo(poly[0].x - 40, y);
+        ctx.bezierCurveTo(poly[0].x + wob, y - 8, poly[2].x - wob, y + 8, poly[2].x + 40, y + Math.sin(i + t) * 6);
+        ctx.strokeStyle = `rgba(190,245,255,${strength})`;
+        ctx.lineWidth = 1.2 + Math.sin(t * 2 + i) * 0.4;
+        ctx.stroke();
+      }
+      ctx.globalCompositeOperation = "source-over";
+      ctx.restore();
+    }
+
+    function drawRefraction(poly, t) {
+      ctx.save();
+      polyPath(poly);
+      ctx.clip();
+      for (let i = 0; i < 26; i++) {
+        const x = lerp(poly[0].x, poly[1].x, i / 25);
+        const drift = Math.sin(t * 1.8 + i * 0.9) * 7;
+        ctx.beginPath();
+        ctx.moveTo(x + drift, poly[0].y - 10);
+        ctx.lineTo(x - drift * 0.5, poly[2].y + 10);
+        ctx.strokeStyle = `rgba(205,247,255,${0.03 + Math.sin(t + i) * 0.01})`;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    function renderPlants(cb, t, jobs) {
+      for (const p of plants) {
+        const pts = [];
+        for (let i = 0; i < 7; i++) {
+          const u = i / 6;
+          const sway = Math.sin(t * 1.3 + p.phase + u * 2.2) * 0.08 * u;
+          const wp = v3(p.x + sway, u * p.h, p.z + Math.cos(t * 1.1 + p.phase + u) * 0.05 * u);
+          const sp = project(wp, cb);
+          if (!sp) { pts.length = 0; break; }
+          pts.push(sp);
+        }
+        if (pts.length < 2) continue;
+        const depth = pts.reduce((s, q) => s + q.z, 0) / pts.length;
+        jobs.push(() => {
+          ctx.beginPath();
+          ctx.moveTo(pts[0].x, pts[0].y);
+          for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+          ctx.strokeStyle = "rgba(98,210,130,0.65)";
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }, depth);
+      }
+    }
+
+    function updateBubbles(dt, t) {
+      for (const b of bubbles) {
+        b.y += b.speed * dt;
+        b.x += Math.sin(t * 0.8 + b.phase + b.y * 2) * dt * b.sway;
+        b.z += Math.cos(t * 0.9 + b.phase + b.y * 1.5) * dt * b.sway * 0.7;
+        if (b.y > tank.h - 0.12) {
+          b.y = rand(0.05, 0.25);
+          b.x = rand(-half.x, half.x);
+          b.z = rand(-half.z, half.z);
+        }
+      }
+    }
+
+    function renderBubbles(cb, jobs) {
+      for (const b of bubbles) {
+        const p = project(b, cb);
+        if (!p) continue;
+        jobs.push(() => {
+          const r = clamp(18 / p.z, 0.7, 3.8);
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, r, 0, TAU);
+          ctx.strokeStyle = "rgba(188,245,255,0.55)";
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        }, p.z);
+      }
+    }
+
+    function renderBackground(t) {
+      const g = ctx.createRadialGradient(W * 0.5, H * 0.22, H * 0.06, W * 0.5, H * 0.7, H * 0.95);
+      g.addColorStop(0, "#0e3f67");
+      g.addColorStop(0.5, "#032644");
+      g.addColorStop(1, "#021225");
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = "rgba(68,169,214,0.08)";
+      for (let i = 0; i < 7; i++) {
+        const y = (i / 6) * H;
+        const wave = Math.sin(t * 0.8 + i * 0.9) * 15;
+        ctx.fillRect(0, y + wave, W, 2);
+      }
+      drawCaustics([{ x: 0, y: 0 }, { x: W, y: 0 }, { x: W, y: H }, { x: 0, y: H }], t * 0.6, 0.035);
+    }
+
+    let prev = performance.now();
+    function frame(now) {
+      const dt = Math.min((now - prev) * 0.001, 0.033);
+      prev = now;
+      const t = now * 0.001;
+
+      for (const f of fishes) updateFish(f, dt, t);
+      updateBubbles(dt, t);
+
+      renderBackground(t);
+      const cb = cameraBasis();
+      const jobs = [];
+      jobs.push((() => {}), 0);
+      renderTank(cb, t, jobs);
+      renderPlants(cb, t, jobs);
+      renderBubbles(cb, jobs);
+      for (const f of fishes) renderFish(f, cb, t, jobs);
+
+      const drawCalls = [];
+      for (let i = 0; i < jobs.length; i += 2) drawCalls.push({ fn: jobs[i], z: jobs[i + 1] || 0 });
+      drawCalls.sort((a, b) => b.z - a.z);
+      for (const d of drawCalls) d.fn();
+
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+  </script>
+</body>
+</html>
