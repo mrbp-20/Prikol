@@ -22,10 +22,14 @@ RU | EN
 
 ### Структура файлов
 
-- `interactive-3d-aquarium.html` — версия на Three.js (CDN).
-- `interactive-3d-aquarium-standalone.html` — чистая standalone-версия.
 - `interactive-3d-aquarium-standalone-optimized.html` — оптимизированная standalone-версия (рекомендуется).
-- `st.txt` — исходное ТЗ.
+- `AQUARIUM_TASK_SPECIFICATION.md` — исходное ТЗ в формате Markdown.
+- `AQUARIUM_BUILD_JOURNAL_RU_EN.md` — подробный двуязычный журнал разработки.
+
+### История проекта
+
+- [ТЗ, по которому строился аквариум](./AQUARIUM_TASK_SPECIFICATION.md)
+- [Подробный журнал сборки (RU/EN)](./AQUARIUM_BUILD_JOURNAL_RU_EN.md)
 
 ### Быстрый запуск (Windows / PowerShell)
 
@@ -81,10 +85,14 @@ Rendering is done with `Canvas 2D` and custom 3D projection math.
 
 ### File Structure
 
-- `interactive-3d-aquarium.html` — Three.js-based version (CDN).
-- `interactive-3d-aquarium-standalone.html` — pure standalone version.
 - `interactive-3d-aquarium-standalone-optimized.html` — optimized standalone version (recommended).
-- `st.txt` — original task specification.
+- `AQUARIUM_TASK_SPECIFICATION.md` — original task specification in Markdown.
+- `AQUARIUM_BUILD_JOURNAL_RU_EN.md` — detailed bilingual build journal.
+
+### Project History
+
+- [Task specification used to build the aquarium](./AQUARIUM_TASK_SPECIFICATION.md)
+- [Detailed build journal (RU/EN)](./AQUARIUM_BUILD_JOURNAL_RU_EN.md)
 
 ### Quick Start (Windows / PowerShell)
 
